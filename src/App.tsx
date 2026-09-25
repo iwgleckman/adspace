@@ -400,29 +400,55 @@ function StatCard({ label, value, sub, trend, trendUp }: { label: string; value:
 /* ================================================================
    Report modal (bug / user report / content report)
 ================================================================ */
+function fmtUSD(n: number) {
+  return n.toLocaleString("en-US", { style: "currency", currency: "USD", minimumFractionDigits: 2, maximumFractionDigits: 2 });
+}
+
+// Returns the kill fee amount (10% of cap) if past the 24-hour free window, else null.
+function computeKillFee(acceptedAt: string | null | undefined, payoutCap: number | null | undefined): number | null {
+  if (!acceptedAt || !payoutCap || payoutCap <= 0) return null;
+  const hoursElapsed = (Date.now() - new Date(acceptedAt).getTime()) / 3_600_000;
+  if (hoursElapsed <= 24) return null;
+  return Math.round(payoutCap * 0.10 * 100) / 100;
+}
+
 function CancelOfferModal({
   side,
   onConfirm,
   onClose,
   confirming,
+  killFee,
 }: {
   side: "sponsor" | "creator";
   onConfirm: () => void;
   onClose: () => void;
   confirming: boolean;
+  killFee?: number | null; // if set and > 0, sponsor must acknowledge kill fee
 }) {
-  const body =
-    side === "sponsor"
+  const hasKillFee = side === "sponsor" && killFee && killFee > 0;
+
+  const title = hasKillFee ? "Cancel offer — kill fee applies" : "Cancel offer?";
+
+  const body = hasKillFee
+    ? `The free cancellation window has closed. Cancelling now will charge you a kill fee of ${fmtUSD(killFee!)}, paid directly to the creator. This will also be recorded on your sponsor profile.`
+    : side === "sponsor"
       ? "Cancelling now means this creator won't be paid, and it will be recorded on your sponsor profile. Are you sure?"
       : "Cancelling now means you won't be paid for this campaign, and it will be recorded on your creator profile. Are you sure?";
+
   return (
     <div className="fixed inset-0 z-50 flex items-center justify-center" style={{ backgroundColor: "rgba(0,0,0,0.35)" }}>
       <div className="bg-white rounded-2xl shadow-xl w-full max-w-sm mx-4 flex flex-col overflow-hidden">
         <div className="flex items-center justify-between px-6 py-5 border-b border-gray-100">
-          <h2 className="text-base font-semibold text-gray-900">Cancel offer?</h2>
+          <h2 className="text-base font-semibold text-gray-900">{title}</h2>
           <button onClick={onClose} className="text-gray-400 hover:text-gray-600 text-xl leading-none">&times;</button>
         </div>
-        <div className="px-6 py-5">
+        <div className="px-6 py-5 flex flex-col gap-3">
+          {hasKillFee && (
+            <div className="flex items-center gap-3 px-4 py-3 rounded-xl" style={{ backgroundColor: "#FFF7ED", border: "1px solid #FED7AA" }}>
+              <span className="text-lg">⚠️</span>
+              <p className="text-sm font-semibold" style={{ color: "#EA580C" }}>{fmtUSD(killFee!)} kill fee</p>
+            </div>
+          )}
           <p className="text-sm text-gray-600 leading-relaxed">{body}</p>
         </div>
         <div className="flex items-center justify-end gap-3 px-6 py-4 border-t border-gray-100">
@@ -433,7 +459,7 @@ function CancelOfferModal({
             className="text-sm font-semibold px-5 py-2 rounded-lg text-white disabled:opacity-60 transition-opacity"
             style={{ backgroundColor: "#EF4444" }}
           >
-            {confirming ? "Cancelling…" : "Yes, cancel"}
+            {confirming ? "Cancelling…" : hasKillFee ? `Yes, pay ${fmtUSD(killFee!)} & cancel` : "Yes, cancel"}
           </button>
         </div>
       </div>
@@ -1537,16 +1563,28 @@ function ManageCampaignsView({ dbSponsor }: { dbSponsor?: DbSponsor | null }) {
                   <label htmlFor="hasCap" className="text-sm text-gray-700 select-none">Set a payout cap (maximum total payout)</label>
                 </div>
                 {form.hasCap && (
-                  <Field label="Payout cap" error={errors.payoutCap} required prefix="$">
-                    <input
-                      type="number"
-                      min="0"
-                      value={form.payoutCap}
-                      onChange={(e) => setForm((f) => ({ ...f, payoutCap: e.target.value }))}
-                      placeholder="1000000"
-                      className={fieldClass(!!errors.payoutCap) + " pl-7"}
-                    />
-                  </Field>
+                  <>
+                    <Field label="Payout cap" error={errors.payoutCap} required prefix="$">
+                      <input
+                        type="number"
+                        min="0"
+                        value={form.payoutCap}
+                        onChange={(e) => setForm((f) => ({ ...f, payoutCap: e.target.value }))}
+                        placeholder="1000000"
+                        className={fieldClass(!!errors.payoutCap) + " pl-7"}
+                      />
+                    </Field>
+                    {/* Live cancellation policy disclaimer */}
+                    <div className="flex items-start gap-2 px-3 py-2.5 rounded-xl" style={{ backgroundColor: "#FFF7ED", border: "1px solid #FED7AA" }}>
+                      <span className="text-sm mt-0.5">ℹ️</span>
+                      <p className="text-xs leading-relaxed" style={{ color: "#92400E" }}>
+                        <span className="font-semibold">Cancellation policy:</span> If you cancel this offer more than 24 hours after a creator accepts, you'll be charged a kill fee of 10% of this cap, paid to the creator.
+                        {Number(form.payoutCap) > 0 && (
+                          <> That's <span className="font-semibold">{fmtUSD(Math.round(Number(form.payoutCap) * 0.10 * 100) / 100)}</span> on a {fmtUSD(Number(form.payoutCap))} cap.</>
+                        )}
+                      </p>
+                    </div>
+                  </>
                 )}
               </div>
 
@@ -2171,7 +2209,7 @@ function MessagesView({ conversations = [], setConversations, initialCreatorId }
   const [input, setInput] = useState("");
   const [showOfferPicker, setShowOfferPicker] = useState(false);
   const [sponsorCampaigns, setSponsorCampaigns] = useState<Campaign[]>([]);
-  const [cancelOfferTarget, setCancelOfferTarget] = useState<{ offerId: string; convoId: string | number; pinnedId: string | number } | null>(null);
+  const [cancelOfferTarget, setCancelOfferTarget] = useState<{ offerId: string; convoId: string | number; pinnedId: string | number; acceptedAt?: string | null; payoutCap?: number | null } | null>(null);
   const [cancellingOffer, setCancellingOffer] = useState(false);
 
   useEffect(() => {
@@ -2368,20 +2406,29 @@ function MessagesView({ conversations = [], setConversations, initialCreatorId }
   async function handleSponsorCancelOffer() {
     if (!cancelOfferTarget) return;
     setCancellingOffer(true);
-    const { offerId, convoId, pinnedId } = cancelOfferTarget;
-    console.log("[cancel-sponsor] offerId:", offerId);
+    const { offerId, convoId, pinnedId, acceptedAt, payoutCap } = cancelOfferTarget;
+
+    // Compute kill fee (10% of cap) if past the 24-hour free window.
+    const killFee = computeKillFee(acceptedAt, payoutCap);
+    console.log("[cancel-sponsor] offerId:", offerId, "killFee:", killFee);
+
     const { data: { user } } = await supabase.auth.getUser();
     if (user) {
       const { data: sp } = await supabase.from("sponsors").select("id, cancellation_count").eq("user_id", user.id).maybeSingle();
-      const { error: offerErr } = await supabase.from("offers").update({ status: "cancelled_by_sponsor" }).eq("id", offerId);
+      const { error: offerErr } = await supabase.from("offers").update({
+        status: "cancelled_by_sponsor",
+        kill_fee_charged: killFee ?? null,
+      }).eq("id", offerId);
       console.log("[cancel-sponsor] offer update:", offerErr?.message ?? "ok");
       if (sp) {
         const newCount = (sp.cancellation_count ?? 0) + 1;
         await supabase.from("sponsors").update({ cancellation_count: newCount }).eq("id", sp.id);
         console.log("[cancel-sponsor] cancellation_count now:", newCount);
       }
-      // System message to creator thread
-      const { error: msgErr } = await supabase.from("messages").insert({ offer_id: offerId, sender_id: user.id, body: "⚠️ The sponsor has cancelled this offer. No payment will be made." });
+      const sysMsg = killFee && killFee > 0
+        ? `⚠️ The sponsor has cancelled this offer. A kill fee of ${fmtUSD(killFee)} will be paid to you.`
+        : "⚠️ The sponsor has cancelled this offer. No payment will be made.";
+      const { error: msgErr } = await supabase.from("messages").insert({ offer_id: offerId, sender_id: user.id, body: sysMsg });
       console.log("[cancel-sponsor] system message:", msgErr?.message ?? "ok");
     }
     setConversations((prev) => prev.map((c) => c.id === convoId ? {
@@ -2400,6 +2447,7 @@ function MessagesView({ conversations = [], setConversations, initialCreatorId }
         confirming={cancellingOffer}
         onConfirm={handleSponsorCancelOffer}
         onClose={() => setCancelOfferTarget(null)}
+        killFee={computeKillFee(cancelOfferTarget.acceptedAt, cancelOfferTarget.payoutCap)}
       />
     )}
     <div className="flex h-full overflow-hidden">
@@ -2524,12 +2572,17 @@ function MessagesView({ conversations = [], setConversations, initialCreatorId }
                 )}
                 {o.status === "accepted" && (o.submissions ?? []).length === 0 && !((o.status as string) === "cancelled_by_sponsor" || (o.status as string) === "cancelled_by_creator") && (
                   <div className="px-4 py-2.5 border-t border-gray-100 flex items-center justify-between gap-3">
-                    <p className="text-xs text-gray-400" style={{ fontFamily: "'DM Mono', monospace" }}>Waiting for creator to submit video</p>
+                    <p className="text-xs text-gray-400" style={{ fontFamily: "'DM Mono', monospace" }}>
+                      {(() => {
+                        const kf = computeKillFee(o.acceptedAt, o.payoutCap);
+                        return kf ? `Kill fee applies: ${fmtUSD(kf)}` : "Waiting for creator to submit video";
+                      })()}
+                    </p>
                     <button
                       className="text-xs font-semibold px-3 py-1 rounded-lg border border-red-200 text-red-500 hover:bg-red-50 transition-colors shrink-0"
                       onClick={() => {
                         const offerId = (o as any).offerId ?? active.offerId;
-                        if (offerId) setCancelOfferTarget({ offerId, convoId: active.id, pinnedId: pinned.id });
+                        if (offerId) setCancelOfferTarget({ offerId, convoId: active.id, pinnedId: pinned.id, acceptedAt: o.acceptedAt, payoutCap: o.payoutCap });
                       }}
                     >
                       Cancel offer

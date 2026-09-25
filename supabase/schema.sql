@@ -221,6 +221,14 @@ create policy "reports_insert" on public.reports for insert
 -- alter table public.creators
 --   add column if not exists language_breakdown jsonb;
 
+-- ── Migration: kill_fee_charged column on offers ───────────────────────────────
+-- Tracks whether a kill fee was applied when a sponsor cancelled after the 24h
+-- free window. Stored as a numeric amount (null = no kill fee applied).
+-- Run in Supabase SQL editor:
+--
+-- alter table public.offers
+--   add column if not exists kill_fee_charged numeric;
+
 -- ── Migration: Stripe payment tracking columns on submissions ───────────────────
 -- Run in Supabase SQL editor:
 --
