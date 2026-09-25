@@ -613,7 +613,7 @@ function ReportModal({
 /* ================================================================
    Sidebar
 ================================================================ */
-function Sidebar({ activeNav, setActiveNav, onHome, sponsor }: { activeNav: string; setActiveNav: (id: string) => void; onHome: () => void; sponsor?: DbSponsor | null }) {
+function Sidebar({ activeNav, setActiveNav, onHome, onSignOut, sponsor }: { activeNav: string; setActiveNav: (id: string) => void; onHome: () => void; onSignOut: () => void; sponsor?: DbSponsor | null }) {
   const [showReport, setShowReport] = useState(false);
   return (
     <aside className="w-60 shrink-0 flex flex-col bg-white border-r border-gray-100 h-full">
@@ -657,6 +657,13 @@ function Sidebar({ activeNav, setActiveNav, onHome, sponsor }: { activeNav: stri
           <p className="text-xs font-semibold truncate" style={{ color: activeNav === "myprofile" ? "#0E7490" : "#1F2937" }}>{sponsor?.company_name ?? "My Profile"}</p>
           <p className="text-xs text-gray-400 truncate">View my profile</p>
         </div>
+      </button>
+      <button
+        onClick={onSignOut}
+        className="px-6 py-2.5 text-left border-t border-gray-100 flex items-center gap-2 hover:bg-red-50 transition-colors group"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" strokeWidth="2" className="group-hover:stroke-red-400"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        <span className="text-xs text-gray-400 group-hover:text-red-500">Log out</span>
       </button>
       <button
         onClick={() => setShowReport(true)}
@@ -2838,7 +2845,7 @@ type Application = {
 /* ================================================================
    Creator app — sidebar
 ================================================================ */
-function CreatorSidebar({ activeNav, setActiveNav, onHome, creator }: { activeNav: string; setActiveNav: (id: string) => void; onHome: () => void; creator?: DbCreator | null }) {
+function CreatorSidebar({ activeNav, setActiveNav, onHome, onSignOut, creator }: { activeNav: string; setActiveNav: (id: string) => void; onHome: () => void; onSignOut: () => void; creator?: DbCreator | null }) {
   const [showReport, setShowReport] = useState(false);
   return (
     <aside className="w-60 shrink-0 flex flex-col bg-white border-r border-gray-100 h-full">
@@ -2883,6 +2890,13 @@ function CreatorSidebar({ activeNav, setActiveNav, onHome, creator }: { activeNa
           <p className="text-xs font-semibold truncate" style={{ color: activeNav === "profile" ? "#EF4444" : "#1F2937" }}>{creator?.name ?? "My Channel"}</p>
           <p className="text-xs text-gray-400 truncate">View my channel</p>
         </div>
+      </button>
+      <button
+        onClick={onSignOut}
+        className="px-6 py-2.5 text-left border-t border-gray-100 flex items-center gap-2 hover:bg-red-50 transition-colors group"
+      >
+        <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="#9CA3AF" strokeWidth="2" className="group-hover:stroke-red-400"><path d="M9 21H5a2 2 0 0 1-2-2V5a2 2 0 0 1 2-2h4"/><polyline points="16 17 21 12 16 7"/><line x1="21" y1="12" x2="9" y2="12"/></svg>
+        <span className="text-xs text-gray-400 group-hover:text-red-500">Log out</span>
       </button>
       <button
         onClick={() => setShowReport(true)}
@@ -3991,7 +4005,7 @@ function BrandProfileView({ brandName, onBack }: { brandName: string; onBack: ()
 /* ================================================================
    Creator app — root
 ================================================================ */
-function CreatorApp({ onHome, creator }: { onHome: () => void; creator?: DbCreator | null }) {
+function CreatorApp({ onHome, onSignOut, creator }: { onHome: () => void; onSignOut: () => void; creator?: DbCreator | null }) {
   const [activeNav, setActiveNav] = useState("browse");
   const [selectedBrand, setSelectedBrand] = useState<string | null>(null);
   const [messageBrandId, setMessageBrandId] = useState<string | undefined>(undefined);
@@ -4047,7 +4061,7 @@ function CreatorApp({ onHome, creator }: { onHome: () => void; creator?: DbCreat
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#F8F9FB]" style={{ fontFamily: "'DM Sans', sans-serif" }}>
-      <CreatorSidebar activeNav={activeNav} setActiveNav={handleNavChange} onHome={onHome} creator={creator} />
+      <CreatorSidebar activeNav={activeNav} setActiveNav={handleNavChange} onHome={onHome} onSignOut={onSignOut} creator={creator} />
       <main className="flex-1 overflow-y-auto">
         {selectedBrand ? (
           <BrandProfileView brandName={selectedBrand} onBack={() => setSelectedBrand(null)} />
@@ -4859,13 +4873,13 @@ export default function App() {
   }
 
   if (screen === "creator-app") {
-    return <CreatorApp onHome={handleSignOut} creator={dbCreator} />;
+    return <CreatorApp onHome={handleSignOut} onSignOut={handleSignOut} creator={dbCreator} />;
   }
 
 
   return (
     <div className="flex h-screen overflow-hidden bg-[#F8F9FB]" style={{ fontFamily: "'DM Sans', sans-serif" }}>
-      <Sidebar activeNav={activeNav} setActiveNav={handleNavChange} onHome={() => setScreen("landing")} sponsor={dbSponsor} />
+      <Sidebar activeNav={activeNav} setActiveNav={handleNavChange} onHome={() => setScreen("landing")} onSignOut={handleSignOut} sponsor={dbSponsor} />
       <main className="flex-1 overflow-y-auto">
         {activeNav === "browse" && !selectedCreator && (
           <BrowseCreatorsView onViewProfile={handleViewProfile} onMakeOffer={setOfferTarget} savedIds={savedIds} onToggleSave={(id) => setSavedIds((prev) => { const n = new Set(prev); n.has(id) ? n.delete(id) : n.add(id); return n; })} />
