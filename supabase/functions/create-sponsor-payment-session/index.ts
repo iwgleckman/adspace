@@ -2,7 +2,7 @@ import { createClient } from "https://esm.sh/@supabase/supabase-js@2?target=deno
 
 const STRIPE_KEY = Deno.env.get("STRIPE_SECRET_KEY")!;
 
-// Service-role client for DB writes (bypasses RLS).
+// Service-role client for DB reads/writes (bypasses RLS).
 const supabaseAdmin = createClient(
   Deno.env.get("SUPABASE_URL")!,
   Deno.env.get("SUPABASE_SERVICE_ROLE_KEY")!,
@@ -83,12 +83,13 @@ Deno.serve(async (req: Request) => {
   console.log("[sponsor-payment] submissionId:", submissionId, "caller:", user.id);
 
   try {
-    // ── Load submission + offer + campaign, and verify sponsor ownership ────
+    // ── Load submission + offer + campaign, verify sponsor ownership ────────
     const { data: submission, error: subErr } = await supabaseAdmin
       .from("submissions")
       .select(`
         id,
         offer_id,
+        approved_at,
         payment_status,
         offers (
           id,
@@ -97,6 +98,8 @@ Deno.serve(async (req: Request) => {
             id,
             name,
             flat_fee,
+            payout_cap,
+            payout_window_days,
             sponsor_id,
             sponsors ( id, user_id )
           )
@@ -126,7 +129,6 @@ Deno.serve(async (req: Request) => {
       });
     }
 
-    // Amount in cents (Stripe requires integer cents).
     const flatFeeDollars = Number(campaign.flat_fee ?? 0);
     if (flatFeeDollars <= 0) {
       return new Response(JSON.stringify({ error: "Campaign flat_fee must be > 0 to create a payment session" }), {
@@ -134,30 +136,64 @@ Deno.serve(async (req: Request) => {
         headers: { ...CORS, "Content-Type": "application/json" },
       });
     }
-    const amountCents = Math.round(flatFeeDollars * 100);
 
-    console.log("[sponsor-payment] amount:", flatFeeDollars, "USD →", amountCents, "cents");
+    const payoutCapDollars = campaign.payout_cap ? Number(campaign.payout_cap) : null;
+    // Only split if cap exceeds flat fee — otherwise charge flat fee only (uncapped or cap == flat fee).
+    const isCapped = payoutCapDollars !== null && payoutCapDollars > flatFeeDollars;
+
+    const flatFeeCents = Math.round(flatFeeDollars * 100);
+    const heldCents = isCapped ? Math.round((payoutCapDollars! - flatFeeDollars) * 100) : 0;
+
+    console.log(
+      "[sponsor-payment] flatFee:", flatFeeDollars, "cap:", payoutCapDollars,
+      "flatFeeCents:", flatFeeCents, "heldCents:", heldCents,
+    );
+
+    // ── Build line items ────────────────────────────────────────────────────
+    const lineItems: Record<string, string> = {
+      "line_items[0][price_data][currency]": "usd",
+      "line_items[0][price_data][unit_amount]": String(flatFeeCents),
+      "line_items[0][price_data][product_data][name]": `AdSpace · ${campaign.name} — Flat fee`,
+      "line_items[0][price_data][product_data][description]":
+        "Paid to the creator immediately once your payment is confirmed.",
+      "line_items[0][quantity]": "1",
+    };
+
+    if (isCapped && heldCents > 0) {
+      const payoutWindowDays = Number(campaign.payout_window_days ?? 30);
+      const approvedAt = (submission as any).approved_at;
+      let windowEndsLabel = "";
+      if (approvedAt) {
+        const windowEndsDate = new Date(new Date(approvedAt).getTime() + payoutWindowDays * 86_400_000);
+        windowEndsLabel = windowEndsDate.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
+      }
+      lineItems["line_items[1][price_data][currency]"] = "usd";
+      lineItems["line_items[1][price_data][unit_amount]"] = String(heldCents);
+      lineItems["line_items[1][price_data][product_data][name]"] =
+        `AdSpace · ${campaign.name} — Performance hold (up to cap)`;
+      lineItems["line_items[1][price_data][product_data][description]"] =
+        `Held by AdSpace until the payout window ends${windowEndsLabel ? ` on ${windowEndsLabel}` : ""}. ` +
+        `Nothing further is paid out before then — once the window closes, the creator is paid based on CPM performance and any unused amount is refunded to you.`;
+      lineItems["line_items[1][quantity]"] = "1";
+    }
 
     // ── Create Stripe Checkout Session ──────────────────────────────────────
     console.log("[sponsor-payment] creating Stripe Checkout Session");
     const session = await stripePostForm("/v1/checkout/sessions", {
       mode: "payment",
-      "line_items[0][price_data][currency]": "usd",
-      "line_items[0][price_data][unit_amount]": String(amountCents),
-      "line_items[0][price_data][product_data][name]": `AdSpace · ${campaign.name}`,
-      "line_items[0][price_data][product_data][description]": `Sponsorship payout for submission ${submissionId}`,
-      "line_items[0][quantity]": "1",
+      ...lineItems,
       success_url: "https://berry-beige-83476330.figma.site/payment/success",
       cancel_url: "https://berry-beige-83476330.figma.site/payment/cancelled",
-      // Embed submission ID in metadata for webhook reconciliation later.
       "metadata[submission_id]": submissionId,
       "metadata[offer_id]": offer.id,
       "metadata[campaign_id]": campaign.id,
+      "metadata[flat_fee_cents]": String(flatFeeCents),
+      "metadata[held_cents]": String(heldCents),
     });
 
     console.log("[sponsor-payment] Checkout Session created:", session.id, "url:", session.url);
 
-    // ── Persist session ID + payment_intent to submission row ───────────────
+    // ── Persist session ID to submission row ────────────────────────────────
     const { error: updateErr } = await supabaseAdmin
       .from("submissions")
       .update({
@@ -169,9 +205,8 @@ Deno.serve(async (req: Request) => {
 
     if (updateErr) {
       console.error("[sponsor-payment] db update failed:", updateErr.message);
-      // Non-fatal — return the URL so the sponsor can still pay even if we retry the DB write.
     } else {
-      console.log("[sponsor-payment] submission updated with session id and payment_status=pending");
+      console.log("[sponsor-payment] submission updated — payment_status=pending");
     }
 
     return new Response(

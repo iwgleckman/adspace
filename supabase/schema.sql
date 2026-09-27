@@ -238,6 +238,17 @@ create policy "reports_insert" on public.reports for insert
 --   add column if not exists payment_status text default 'unpaid';
 -- -- payment_status values: 'unpaid', 'pending', 'paid', 'refunded'
 
+-- ── Migration: escrow / payout tracking columns on submissions ──────────────────
+-- amount_paid_to_creator: running total transferred to creator (starts at flat_fee on checkout.session.completed)
+-- payout_window_ends_at:  approved_at + campaign.payout_window_days — when the held escrow may be released
+-- stripe_transfer_id:     Stripe Transfer ID for the flat-fee payout (for reconciliation)
+-- Run in Supabase SQL editor:
+--
+-- alter table public.submissions
+--   add column if not exists amount_paid_to_creator numeric(12,2),
+--   add column if not exists payout_window_ends_at timestamptz,
+--   add column if not exists stripe_transfer_id text;
+
 -- ── Migration: stripe_account_id column on creators ────────────────────────────
 -- Run in Supabase SQL editor:
 --

@@ -1846,6 +1846,9 @@ type Submission = {
   rejectionReason?: string;
   paymentStatus?: "unpaid" | "pending" | "paid" | "refunded";
   stripeCheckoutSessionId?: string;
+  amountPaidToCreator?: number | null;
+  payoutWindowEndsAt?: string | null;
+  stripeTransferId?: string | null;
 };
 
 type Message = {
@@ -2023,13 +2026,16 @@ function CreatorSubmissionSection({
 }
 
 function SponsorSubmissionCard({
-  sub, index, onApprove, onReject, onPay,
+  sub, index, onApprove, onReject, onPay, flatFee, payoutCap, payoutWindowDays,
 }: {
   sub: Submission;
   index: number;
   onApprove: (subId: string, approvedAt: string) => void;
   onReject: (subId: string, reason: string) => void;
   onPay?: (subId: string) => void;
+  flatFee?: number;
+  payoutCap?: number | null;
+  payoutWindowDays?: number;
 }) {
   const [rejectMode, setRejectMode] = useState(false);
   const [reason, setReason] = useState("");
@@ -2125,27 +2131,66 @@ function SponsorSubmissionCard({
           <p className="text-xs text-gray-400" style={{ fontFamily: "'DM Mono', monospace" }}>
             {sub.approvedAt ? `Approved ${new Date(sub.approvedAt).toLocaleDateString("en-US", { month: "short", day: "numeric" })}` : "Approved"}
           </p>
-          {/* Payment CTA — only show when payment hasn't been initiated */}
-          {(!sub.paymentStatus || sub.paymentStatus === "unpaid") && (
-            <button
-              onClick={handlePay}
-              disabled={paying}
-              className="w-full text-xs font-semibold py-2 rounded-lg text-white transition-opacity hover:opacity-90 disabled:opacity-40"
-              style={{ backgroundColor: "#0E7490" }}
-            >
-              {paying ? "Opening checkout…" : "Review & Pay"}
-            </button>
-          )}
+          {/* Pre-pay escrow breakdown — only for capped campaigns */}
+          {(!sub.paymentStatus || sub.paymentStatus === "unpaid") && (() => {
+            const cap = payoutCap ?? null;
+            const fee = flatFee ?? 0;
+            const held = cap && cap > fee ? cap - fee : 0;
+            const windowDays = payoutWindowDays ?? 30;
+            const approvedAt = sub.approvedAt;
+            const windowEnds = approvedAt
+              ? new Date(new Date(approvedAt).getTime() + windowDays * 86_400_000).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+              : null;
+            return (
+              <>
+                {cap && held > 0 && (
+                  <div className="rounded-lg p-3 text-xs leading-relaxed" style={{ backgroundColor: "#FFF7ED", color: "#92400E", fontFamily: "'DM Mono', monospace" }}>
+                    <p className="font-semibold mb-1">You&apos;ll be charged {fmtUSD(cap)} upfront.</p>
+                    <p>{fmtUSD(fee)} goes to the creator immediately. The remaining {fmtUSD(held)} stays held by AdSpace — untouched — until the payout window you set ends{windowEnds ? ` on ${windowEnds}` : ""}. Only then is it paid out to the creator based on actual video performance (CPM), with any unused amount refunded to you.</p>
+                  </div>
+                )}
+                <button
+                  onClick={handlePay}
+                  disabled={paying}
+                  className="w-full text-xs font-semibold py-2 rounded-lg text-white transition-opacity hover:opacity-90 disabled:opacity-40"
+                  style={{ backgroundColor: "#0E7490" }}
+                >
+                  {paying ? "Opening checkout…" : "Review & Pay"}
+                </button>
+              </>
+            );
+          })()}
           {sub.paymentStatus === "pending" && (
             <span className="text-xs font-semibold px-2 py-1 rounded-lg text-center" style={{ backgroundColor: "#FFF7ED", color: "#EA580C", fontFamily: "'DM Mono', monospace" }}>
               Payment pending
             </span>
           )}
-          {sub.paymentStatus === "paid" && (
-            <span className="text-xs font-semibold px-2 py-1 rounded-lg text-center" style={{ backgroundColor: "#F0FDF4", color: "#16A34A", fontFamily: "'DM Mono', monospace" }}>
-              Paid ✓
-            </span>
-          )}
+          {sub.paymentStatus === "paid" && (() => {
+            const cap = payoutCap ?? null;
+            const paid = sub.amountPaidToCreator ?? flatFee ?? 0;
+            const held = cap && cap > paid ? cap - paid : 0;
+            const windowEndsAt = sub.payoutWindowEndsAt;
+            const windowLabel = windowEndsAt
+              ? new Date(windowEndsAt).toLocaleDateString("en-US", { month: "short", day: "numeric", year: "numeric" })
+              : null;
+            if (cap && held > 0) {
+              return (
+                <div className="flex flex-col gap-1.5">
+                  <span className="text-xs font-semibold px-2 py-1 rounded-lg text-center" style={{ backgroundColor: "#F0FDF4", color: "#16A34A", fontFamily: "'DM Mono', monospace" }}>
+                    Flat fee paid ✓ ({fmtUSD(paid)})
+                  </span>
+                  <span className="text-xs px-2 py-1 rounded-lg text-center" style={{ backgroundColor: "#EFF6FF", color: "#1D4ED8", fontFamily: "'DM Mono', monospace" }}>
+                    {fmtUSD(held)} held — nothing happens until the payout window ends{windowLabel ? ` ${windowLabel}` : ""}
+                  </span>
+                </div>
+              );
+            }
+            return (
+              <span className="text-xs font-semibold px-2 py-1 rounded-lg text-center" style={{ backgroundColor: "#F0FDF4", color: "#16A34A", fontFamily: "'DM Mono', monospace" }}>
+                Paid ✓
+              </span>
+            );
+          })()}
         </div>
       )}
       {sub.approvalStatus === "rejected" && (
@@ -2189,18 +2234,21 @@ function SponsorSubmissionCard({
 }
 
 function SponsorSubmissionReview({
-  submissions, onApprove, onReject, onPay,
+  submissions, onApprove, onReject, onPay, flatFee, payoutCap, payoutWindowDays,
 }: {
   submissions: Submission[];
   onApprove: (subId: string, approvedAt: string) => void;
   onReject: (subId: string, reason: string) => void;
   onPay?: (subId: string) => void;
+  flatFee?: number;
+  payoutCap?: number | null;
+  payoutWindowDays?: number;
 }) {
   if (submissions.length === 0) return null;
   return (
     <div className="border-t border-gray-100">
       {submissions.map((sub, i) => (
-        <SponsorSubmissionCard key={sub.id} sub={sub} index={i} onApprove={onApprove} onReject={onReject} onPay={onPay} />
+        <SponsorSubmissionCard key={sub.id} sub={sub} index={i} onApprove={onApprove} onReject={onReject} onPay={onPay} flatFee={flatFee} payoutCap={payoutCap} payoutWindowDays={payoutWindowDays} />
       ))}
     </div>
   );
@@ -2296,6 +2344,9 @@ function MessagesView({ conversations = [], setConversations, initialCreatorId }
               rejectionReason: rawSub.rejection_reason ?? undefined,
               paymentStatus: (rawSub.payment_status ?? "unpaid") as Submission["paymentStatus"],
               stripeCheckoutSessionId: rawSub.stripe_checkout_session_id ?? undefined,
+              amountPaidToCreator: rawSub.amount_paid_to_creator ?? null,
+              payoutWindowEndsAt: rawSub.payout_window_ends_at ?? null,
+              stripeTransferId: rawSub.stripe_transfer_id ?? null,
             };
           }));
 
@@ -2557,6 +2608,9 @@ function MessagesView({ conversations = [], setConversations, initialCreatorId }
                 {o.status === "accepted" && (o.submissions ?? []).length > 0 && (
                   <SponsorSubmissionReview
                     submissions={o.submissions ?? []}
+                    flatFee={o.flatFee}
+                    payoutCap={o.payoutCap}
+                    payoutWindowDays={o.payoutWindowDays}
                     onApprove={(subId, approvedAt) => {
                       setConversations((prev) => prev.map((c) => c.id === active.id ? {
                         ...c,
