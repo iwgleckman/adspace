@@ -1,7 +1,8 @@
-import { useState, useEffect } from "react";
+import { useState, useEffect, useRef } from "react";
 import { supabase } from "./lib/supabase";
 import type { DbCreator, DbSponsor } from "./lib/supabase";
 import adspaceLogo from "./imports/adspace-logo.png";
+import { loadConnectAndInitialize } from "@stripe/connect-js";
 
 /* ---- Wordmark ---- */
 function AdSpaceLogo({ height = 22, className = "" }: { height?: number; className?: string }) {
@@ -4565,12 +4566,94 @@ function LandingPage({ onSelect }: { onSelect: (role: "advertiser" | "creator") 
 }
 
 /* ================================================================
+   Stripe Connect embedded onboarding screen
+   Used for v2 recipient accounts — account_links don't support them.
+   Renders the <stripe-connect-account-onboarding> web component inside
+   the app so creators can add a payout bank account without leaving.
+================================================================ */
+const STRIPE_PUBLISHABLE_KEY = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as string | undefined;
+
+function StripeOnboardingScreen({ clientSecret, onDone }: { clientSecret: string; onDone: () => void }) {
+  const mountRef = useRef<HTMLDivElement>(null);
+  const [loadErr, setLoadErr] = useState<string | null>(null);
+
+  useEffect(() => {
+    if (!STRIPE_PUBLISHABLE_KEY) {
+      setLoadErr("VITE_STRIPE_PUBLISHABLE_KEY is not set. Add pk_test_… to your .env file.");
+      return;
+    }
+    if (!mountRef.current) return;
+
+    // Connect.js loads its script from Stripe's CDN asynchronously, so load
+    // failures don't throw inside the try/catch — they surface as window errors.
+    // This listener catches them and converts to the in-UI error state.
+    const onWindowError = (e: ErrorEvent) => {
+      if (String(e.message).includes("Connect.js") || String(e.message).includes("connect-js")) {
+        setLoadErr(
+          "Stripe's embedded component couldn't load — the preview environment may be blocking connect-js.stripe.com. " +
+          "Bank account setup will work on your production domain. You can skip for now and finish later."
+        );
+      }
+    };
+    window.addEventListener("error", onWindowError);
+
+    try {
+      const instance = loadConnectAndInitialize({
+        publishableKey: STRIPE_PUBLISHABLE_KEY,
+        fetchClientSecret: () => Promise.resolve(clientSecret),
+        appearance: { overlays: "dialog", variables: { colorPrimary: "#0E7490" } },
+      });
+      const onboarding = instance.create("account-onboarding");
+      onboarding.setOnExit(() => onDone());
+      mountRef.current?.appendChild(onboarding);
+    } catch (e: any) {
+      setLoadErr(e?.message ?? "Failed to initialize Stripe Connect.");
+    }
+
+    return () => {
+      window.removeEventListener("error", onWindowError);
+      if (mountRef.current) mountRef.current.innerHTML = "";
+    };
+  }, [clientSecret]);
+
+  return (
+    <div className="min-h-screen flex flex-col items-center justify-start bg-[#F8F9FB] pt-12 px-4" style={{ fontFamily: "'DM Sans', sans-serif" }}>
+      <div className="w-full max-w-lg">
+        <div className="flex items-center gap-3 mb-6">
+          <AdSpaceLogo height={22} />
+        </div>
+        <h1 className="text-xl font-bold text-gray-900 mb-1">Connect your payout account</h1>
+        <p className="text-sm text-gray-500 mb-6">
+          Add your bank account so AdSpace can send you payments when a sponsor&apos;s video is approved.
+        </p>
+        {loadErr ? (
+          <div className="rounded-xl p-4 text-sm" style={{ backgroundColor: "#FFF1F2", color: "#E11D48" }}>
+            <p className="font-semibold mb-1">Setup error</p>
+            <p>{loadErr}</p>
+            <button onClick={onDone} className="mt-3 text-xs underline text-gray-500">Skip for now</button>
+          </div>
+        ) : (
+          <div ref={mountRef} className="w-full" />
+        )}
+        <button
+          onClick={onDone}
+          className="mt-6 text-xs text-gray-400 hover:text-gray-600 underline"
+        >
+          I&apos;ll do this later
+        </button>
+      </div>
+    </div>
+  );
+}
+
+/* ================================================================
    App root
 ================================================================ */
 export default function App() {
   // ── Auth state ──────────────────────────────────────────────────────────────
-  type AppScreen = "loading" | "landing" | "creator-auth" | "sponsor-auth" | "creator-app" | "sponsor-app";
+  type AppScreen = "loading" | "landing" | "creator-auth" | "sponsor-auth" | "creator-app" | "sponsor-app" | "stripe-onboarding";
   const [screen, setScreen] = useState<AppScreen>("loading");
+  const [stripeOnboarding, setStripeOnboarding] = useState<{ clientSecret: string } | null>(null);
   const [dbSponsor, setDbSponsor] = useState<DbSponsor | null>(null);
   const [dbCreator, setDbCreator] = useState<DbCreator | null>(null);
 
@@ -4644,12 +4727,16 @@ export default function App() {
             console.log("[stripe-connect] HTTP status:", res.status, res.statusText);
             const payload = await res.json();
             console.log("[stripe-connect] resume response payload:", payload);
-            if (payload.onboardingUrl) {
-              console.log("[stripe-connect] redirecting to:", payload.onboardingUrl);
-              window.location.href = payload.onboardingUrl;
+            if (payload.clientSecret) {
+              console.log("[stripe-connect] opening embedded onboarding");
+              if (mounted) {
+                setDbCreator(creator);
+                setStripeOnboarding({ clientSecret: payload.clientSecret });
+                setScreen("stripe-onboarding");
+              }
               return;
             } else {
-              console.warn("[stripe-connect] no onboardingUrl — falling through to creator-app");
+              console.warn("[stripe-connect] no clientSecret — falling through to creator-app");
             }
           } catch (stripeErr: any) {
             console.error("[stripe-connect] fetch threw:", stripeErr?.message, stripeErr);
@@ -4720,12 +4807,16 @@ export default function App() {
             console.log("[stripe-connect] HTTP status:", res.status, res.statusText);
             const payload = await res.json();
             console.log("[stripe-connect] response payload:", payload);
-            if (payload.onboardingUrl) {
-              console.log("[stripe-connect] redirecting to:", payload.onboardingUrl);
-              window.location.href = payload.onboardingUrl;
+            if (payload.clientSecret) {
+              console.log("[stripe-connect] opening embedded onboarding");
+              if (mounted) {
+                setDbCreator(newCreator ?? null);
+                setStripeOnboarding({ clientSecret: payload.clientSecret });
+                setScreen("stripe-onboarding");
+              }
               return;
             } else {
-              console.warn("[stripe-connect] no onboardingUrl in response — falling through to creator-app");
+              console.warn("[stripe-connect] no clientSecret in response — falling through to creator-app");
             }
           } catch (stripeErr: any) {
             console.error("[stripe-connect] fetch threw an exception:", stripeErr?.message, stripeErr);
@@ -4922,6 +5013,15 @@ export default function App() {
           }
         }}
         onSwitchToCreator={() => setScreen("creator-auth")}
+      />
+    );
+  }
+
+  if (screen === "stripe-onboarding" && stripeOnboarding) {
+    return (
+      <StripeOnboardingScreen
+        clientSecret={stripeOnboarding.clientSecret}
+        onDone={() => { setStripeOnboarding(null); setScreen("creator-app"); }}
       />
     );
   }
