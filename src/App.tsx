@@ -4705,17 +4705,14 @@ export default function App() {
       console.log("[auth] creator lookup:", { creator, error: creatorErr?.message });
       if (creator) {
         sessionStorage.removeItem("adspace_pending_role");
-        // Resume Stripe onboarding if the creator never completed it.
-        console.log("[stripe-connect] existing creator gate check:", {
-          userEmail: user.email ?? null,
-          stripe_account_id: (creator as any)?.stripe_account_id ?? "(not present)",
-          willCall: !!user.email && !(creator as any)?.stripe_account_id,
-        });
-        if (user.email && !(creator as any).stripe_account_id) {
-          console.log("[stripe-connect] existing creator — condition passed, calling edge function");
+        // Always check Stripe Connect status — a saved stripe_account_id only
+        // means onboarding was started, not that it finished. The edge function
+        // retrieves the live account, checks requirements + capability, and
+        // returns onboardingComplete:true if nothing more is needed.
+        if (user.email) {
+          console.log("[stripe-connect] existing creator — checking onboarding status via edge function");
           try {
             const edgeUrl = "https://wgujjqyiwrsmlkhluadx.supabase.co/functions/v1/create-creator-connect-account";
-            console.log("[stripe-connect] fetching:", edgeUrl, "creatorId:", creator.id);
             const res = await fetch(edgeUrl, {
               method: "POST",
               headers: {
@@ -4726,9 +4723,11 @@ export default function App() {
             });
             console.log("[stripe-connect] HTTP status:", res.status, res.statusText);
             const payload = await res.json();
-            console.log("[stripe-connect] resume response payload:", payload);
-            if (payload.clientSecret) {
-              console.log("[stripe-connect] opening embedded onboarding");
+            console.log("[stripe-connect] status payload:", payload);
+            if (payload.onboardingComplete) {
+              console.log("[stripe-connect] onboarding complete — going to creator-app");
+            } else if (payload.clientSecret) {
+              console.log("[stripe-connect] onboarding incomplete — opening embedded screen");
               if (mounted) {
                 setDbCreator(creator);
                 setStripeOnboarding({ clientSecret: payload.clientSecret });
@@ -4736,13 +4735,11 @@ export default function App() {
               }
               return;
             } else {
-              console.warn("[stripe-connect] no clientSecret — falling through to creator-app");
+              console.warn("[stripe-connect] unexpected response — falling through to creator-app:", payload);
             }
           } catch (stripeErr: any) {
             console.error("[stripe-connect] fetch threw:", stripeErr?.message, stripeErr);
           }
-        } else {
-          console.log("[stripe-connect] existing creator — condition NOT met, going straight to creator-app");
         }
         if (mounted) { setDbCreator(creator); setScreen("creator-app"); }
         return;
@@ -4782,20 +4779,15 @@ export default function App() {
         console.log("[auth] creator upsert result:", { newCreator, error: upsertErr?.message });
         sessionStorage.removeItem("adspace_pending_role");
 
-        // ── Stripe Connect gate — verbose logging ──────────────────────────────
-        console.log("[stripe-connect] gate check:", {
-          upsertErr: upsertErr?.message ?? null,
-          newCreator: newCreator?.id ?? null,
-          userEmail: user.email ?? null,
-          stripe_account_id: (newCreator as any)?.stripe_account_id ?? "(not present)",
-          willCall: !upsertErr && !!newCreator && !!user.email && !(newCreator as any)?.stripe_account_id,
-        });
-
-        if (!upsertErr && newCreator && user.email && !(newCreator as any).stripe_account_id) {
-          console.log("[stripe-connect] condition passed — calling edge function");
+        // Always check Stripe Connect status — same as the existing-creator path.
+        // For a brand-new creator their stripe_account_id is null so the edge
+        // function will create a fresh account; for one who previously started but
+        // never finished, it will detect incomplete requirements and return a
+        // new session; for a complete account it returns onboardingComplete:true.
+        if (!upsertErr && newCreator && user.email) {
+          console.log("[stripe-connect] checking onboarding status via edge function for:", newCreator.id);
           try {
             const edgeUrl = "https://wgujjqyiwrsmlkhluadx.supabase.co/functions/v1/create-creator-connect-account";
-            console.log("[stripe-connect] fetching:", edgeUrl, "with creatorId:", newCreator.id, "email:", user.email);
             const res = await fetch(edgeUrl, {
               method: "POST",
               headers: {
@@ -4806,9 +4798,11 @@ export default function App() {
             });
             console.log("[stripe-connect] HTTP status:", res.status, res.statusText);
             const payload = await res.json();
-            console.log("[stripe-connect] response payload:", payload);
-            if (payload.clientSecret) {
-              console.log("[stripe-connect] opening embedded onboarding");
+            console.log("[stripe-connect] status payload:", payload);
+            if (payload.onboardingComplete) {
+              console.log("[stripe-connect] onboarding complete — going to creator-app");
+            } else if (payload.clientSecret) {
+              console.log("[stripe-connect] onboarding incomplete — opening embedded screen");
               if (mounted) {
                 setDbCreator(newCreator ?? null);
                 setStripeOnboarding({ clientSecret: payload.clientSecret });
@@ -4816,13 +4810,11 @@ export default function App() {
               }
               return;
             } else {
-              console.warn("[stripe-connect] no clientSecret in response — falling through to creator-app");
+              console.warn("[stripe-connect] unexpected response — falling through to creator-app:", payload);
             }
           } catch (stripeErr: any) {
             console.error("[stripe-connect] fetch threw an exception:", stripeErr?.message, stripeErr);
           }
-        } else {
-          console.log("[stripe-connect] condition NOT met — skipping edge function call");
         }
 
         // Use DB record if insert succeeded, otherwise fall back to in-memory

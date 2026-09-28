@@ -12,6 +12,19 @@ const CORS = {
   "Access-Control-Allow-Headers": "authorization, x-client-info, apikey, content-type",
 };
 
+async function stripeGet(path: string, apiVersion = "2023-10-16") {
+  const res = await fetch(`https://api.stripe.com${path}`, {
+    headers: {
+      "Authorization": `Bearer ${STRIPE_KEY}`,
+      "Stripe-Version": apiVersion,
+    },
+  });
+  const json = await res.json();
+  if (!res.ok) throw new Error(json?.error?.message ?? `Stripe GET ${res.status}: ${JSON.stringify(json)}`);
+  return json;
+}
+
+// v2 endpoints accept JSON bodies.
 async function stripePost(path: string, body: Record<string, unknown>, apiVersion: string) {
   const res = await fetch(`https://api.stripe.com${path}`, {
     method: "POST",
@@ -27,13 +40,13 @@ async function stripePost(path: string, body: Record<string, unknown>, apiVersio
   return json;
 }
 
-// v1 endpoints require form-urlencoded, not JSON.
-async function stripePostForm(path: string, body: Record<string, string>, apiVersion: string) {
+// v1 endpoints require form-urlencoded bodies, not JSON.
+async function stripePostForm(path: string, body: Record<string, string>) {
   const res = await fetch(`https://api.stripe.com${path}`, {
     method: "POST",
     headers: {
       "Authorization": `Bearer ${STRIPE_KEY}`,
-      "Stripe-Version": apiVersion,
+      "Stripe-Version": "2023-10-16",
       "Content-Type": "application/x-www-form-urlencoded",
     },
     body: new URLSearchParams(body).toString(),
@@ -41,6 +54,16 @@ async function stripePostForm(path: string, body: Record<string, string>, apiVer
   const json = await res.json();
   if (!res.ok) throw new Error(json?.error?.message ?? `Stripe ${res.status}: ${JSON.stringify(json)}`);
   return json;
+}
+
+// An account is considered fully onboarded when there are no currently_due
+// requirements AND the transfers capability is active.
+function isOnboardingComplete(account: any): boolean {
+  const currentlyDue: string[] = account?.requirements?.currently_due ?? [];
+  const transfersCap = account?.capabilities?.transfers;
+  // "active" means payouts/transfers are enabled; anything else (inactive,
+  // pending, unrequested) means the creator still needs to complete something.
+  return currentlyDue.length === 0 && transfersCap === "active";
 }
 
 Deno.serve(async (req: Request) => {
@@ -77,69 +100,107 @@ Deno.serve(async (req: Request) => {
   console.log("[create-creator-connect-account] creatorId:", creatorId, "email:", creatorEmail);
 
   try {
-    // 1. Create a v2 Connect account (recipient, individual, express dashboard).
-    //    Uses POST /v2/core/accounts — required for platforms that have migrated
-    //    away from the deprecated v1 accounts.create() Express flow.
-    const account = await stripePost(
-      "/v2/core/accounts",
-      {
-        contact_email: creatorEmail,
-        display_name: creatorEmail,
-        dashboard: "express",
-        identity: {
-          country: "us",
-          entity_type: "individual",
-        },
-        configuration: {
-          recipient: {
-            capabilities: {
-              stripe_balance: {
-                stripe_transfers: { requested: true },
+    // ── Check DB for existing Stripe account ────────────────────────────────
+    const { data: creatorRow } = await supabase
+      .from("creators")
+      .select("stripe_account_id")
+      .eq("id", creatorId)
+      .maybeSingle();
+
+    let stripeAccountId: string | null = (creatorRow as any)?.stripe_account_id ?? null;
+
+    if (stripeAccountId) {
+      // ── Existing account: check whether onboarding is actually complete ───
+      // A stripe_account_id in the DB means they started, not that they finished.
+      console.log("[create-creator-connect-account] existing account:", stripeAccountId, "— checking status");
+      let account: any;
+      try {
+        // Retrieve with capabilities expansion so we can check transfers status.
+        account = await stripeGet(`/v1/accounts/${stripeAccountId}?expand[]=capabilities`);
+      } catch (retrieveErr: unknown) {
+        const msg = retrieveErr instanceof Error ? retrieveErr.message : String(retrieveErr);
+        console.error("[create-creator-connect-account] account retrieve failed:", msg, "— treating as incomplete");
+        // If we can't retrieve, fall through to create a new session anyway.
+      }
+
+      if (account && isOnboardingComplete(account)) {
+        console.log("[create-creator-connect-account] account fully onboarded — no session needed");
+        return new Response(
+          JSON.stringify({ onboardingComplete: true, stripeAccountId }),
+          { status: 200, headers: { ...CORS, "Content-Type": "application/json" } },
+        );
+      }
+
+      // Still has outstanding requirements — generate a fresh session for the
+      // same account so the creator can finish where they left off.
+      const currentlyDue = account?.requirements?.currently_due ?? [];
+      console.log(
+        "[create-creator-connect-account] account incomplete — currently_due:", currentlyDue,
+        "transfers capability:", account?.capabilities?.transfers ?? "unknown",
+      );
+    } else {
+      // ── No account yet: create a new v2 recipient account ─────────────────
+      // dashboard: "none" — recipient accounts never log into Stripe directly.
+      // "express" caused a capability mismatch, leaving accounts Restricted.
+      const account = await stripePost(
+        "/v2/core/accounts",
+        {
+          contact_email: creatorEmail,
+          display_name: creatorEmail,
+          dashboard: "none",
+          identity: {
+            country: "us",
+            entity_type: "individual",
+          },
+          configuration: {
+            recipient: {
+              capabilities: {
+                stripe_balance: {
+                  stripe_transfers: { requested: true },
+                },
               },
             },
           },
-        },
-        defaults: {
-          responsibilities: {
-            fees_collector: "application",
-            losses_collector: "application",
+          defaults: {
+            responsibilities: {
+              fees_collector: "application",
+              losses_collector: "application",
+            },
           },
         },
-      },
-      "2026-08-26.preview",
-    );
+        "2026-08-26.preview",
+      );
 
-    console.log("[create-creator-connect-account] v2 account created:", account.id);
+      stripeAccountId = account.id;
+      console.log("[create-creator-connect-account] v2 account created:", stripeAccountId);
 
-    // 2. Generate an onboarding link via the v1 Account Links API.
-    //    v1 endpoints require form-urlencoded bodies, not JSON.
-    const accountLink = await stripePostForm(
-      "/v1/account_links",
-      {
-        account: account.id,
-        refresh_url: "https://berry-beige-83476330.figma.site/stripe/refresh",
-        return_url: "https://berry-beige-83476330.figma.site/stripe/return",
-        type: "account_onboarding",
-      },
-      "2023-10-16",
-    );
+      // Persist immediately so concurrent calls don't create a duplicate account.
+      const { error: dbError } = await supabase
+        .from("creators")
+        .update({ stripe_account_id: stripeAccountId })
+        .eq("id", creatorId);
 
-    console.log("[create-creator-connect-account] onboarding link created:", accountLink.url);
-
-    // 3. Persist the Stripe account ID to the creators table (service role bypasses RLS).
-    const { error: dbError } = await supabase
-      .from("creators")
-      .update({ stripe_account_id: account.id })
-      .eq("id", creatorId);
-
-    if (dbError) {
-      console.error("[create-creator-connect-account] db update failed:", dbError.message);
-    } else {
-      console.log("[create-creator-connect-account] stripe_account_id saved");
+      if (dbError) {
+        console.error("[create-creator-connect-account] db update failed:", dbError.message);
+      } else {
+        console.log("[create-creator-connect-account] stripe_account_id saved");
+      }
     }
 
+    // ── Create Account Session for embedded onboarding ─────────────────────
+    // Works for both new accounts and existing incomplete accounts.
+    // external_account_collection must be enabled so the creator can add their
+    // bank account inside the embedded component.
+    const accountSession = await stripePostForm("/v1/account_sessions", {
+      account: stripeAccountId!,
+      "components[account_onboarding][enabled]": "true",
+      "components[account_onboarding][features][external_account_collection]": "true",
+    });
+
+    console.log("[create-creator-connect-account] account session created, expires_at:", accountSession.expires_at);
+
     return new Response(
-      JSON.stringify({ onboardingUrl: accountLink.url, stripeAccountId: account.id }),
+      JSON.stringify({ clientSecret: accountSession.client_secret, stripeAccountId }),
       { status: 200, headers: { ...CORS, "Content-Type": "application/json" } },
     );
   } catch (err: unknown) {
