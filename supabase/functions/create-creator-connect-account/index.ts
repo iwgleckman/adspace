@@ -110,36 +110,58 @@ Deno.serve(async (req: Request) => {
     let stripeAccountId: string | null = (creatorRow as any)?.stripe_account_id ?? null;
 
     if (stripeAccountId) {
-      // ── Existing account: check whether onboarding is actually complete ───
-      // A stripe_account_id in the DB means they started, not that they finished.
+      // ── Existing account: check type + completion status ──────────────────
+      // A stripe_account_id in the DB means onboarding was started, not finished.
+      // Also check controller type: Express accounts cannot use embedded Account
+      // Sessions — they require hosted account_links. If we find one (left over
+      // from the old dashboard:"express" flow), wipe it and create a fresh
+      // Recipient account so the embedded component works.
       console.log("[create-creator-connect-account] existing account:", stripeAccountId, "— checking status");
       let account: any;
       try {
-        // Retrieve with capabilities expansion so we can check transfers status.
         account = await stripeGet(`/v1/accounts/${stripeAccountId}?expand[]=capabilities`);
       } catch (retrieveErr: unknown) {
         const msg = retrieveErr instanceof Error ? retrieveErr.message : String(retrieveErr);
-        console.error("[create-creator-connect-account] account retrieve failed:", msg, "— treating as incomplete");
-        // If we can't retrieve, fall through to create a new session anyway.
+        console.error("[create-creator-connect-account] account retrieve failed:", msg, "— will create fresh account");
+        stripeAccountId = null; // fall through to new-account creation below
       }
 
-      if (account && isOnboardingComplete(account)) {
-        console.log("[create-creator-connect-account] account fully onboarded — no session needed");
-        return new Response(
-          JSON.stringify({ onboardingComplete: true, stripeAccountId }),
-          { status: 200, headers: { ...CORS, "Content-Type": "application/json" } },
+      if (account) {
+        const dashboardType: string = account?.controller?.dashboard?.type ?? account?.controller?.type ?? "unknown";
+        const currentlyDue: string[] = account?.requirements?.currently_due ?? [];
+        const transfersCap: string = account?.capabilities?.transfers ?? "unknown";
+
+        console.log(
+          "[create-creator-connect-account] account status —",
+          "id:", stripeAccountId,
+          "dashboard/controller type:", dashboardType,
+          "currently_due:", currentlyDue,
+          "transfers capability:", transfersCap,
         );
-      }
 
-      // Still has outstanding requirements — generate a fresh session for the
-      // same account so the creator can finish where they left off.
-      const currentlyDue = account?.requirements?.currently_due ?? [];
-      console.log(
-        "[create-creator-connect-account] account incomplete — currently_due:", currentlyDue,
-        "transfers capability:", account?.capabilities?.transfers ?? "unknown",
-      );
-    } else {
-      // ── No account yet: create a new v2 recipient account ─────────────────
+        // Express accounts cannot use embedded Account Sessions — they always
+        // return an auth error. Replace with a fresh Recipient account.
+        const isExpress = dashboardType === "express" || account?.controller?.type === "application";
+        if (isExpress) {
+          console.warn(
+            "[create-creator-connect-account] account is Express-type — incompatible with embedded components.",
+            "Creating new Recipient account and updating DB.",
+          );
+          stripeAccountId = null; // clear so we fall through to creation below
+        } else if (isOnboardingComplete(account)) {
+          console.log("[create-creator-connect-account] account fully onboarded — no session needed");
+          return new Response(
+            JSON.stringify({ onboardingComplete: true, stripeAccountId }),
+            { status: 200, headers: { ...CORS, "Content-Type": "application/json" } },
+          );
+        } else {
+          console.log("[create-creator-connect-account] account incomplete — will create fresh session");
+        }
+      }
+    }
+
+    if (!stripeAccountId) {
+      // ── No account (new creator, or Express account replaced above) ────────
       // dashboard: "none" — recipient accounts never log into Stripe directly.
       // "express" caused a capability mismatch, leaving accounts Restricted.
       const account = await stripePost(
