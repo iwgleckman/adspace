@@ -127,21 +127,27 @@ Deno.serve(async (req: Request) => {
       }
 
       if (account) {
-        const dashboardType: string = account?.controller?.dashboard?.type ?? account?.controller?.type ?? "unknown";
+        // controller.stripe_dashboard.type is the correct field for Express detection
+        // on GET /v1/accounts/{id} responses. controller.type === "application" means
+        // your platform is the controller — it's true for ALL platform-owned accounts
+        // (Express, Custom, Recipient) and must NOT be used as an Express discriminator.
+        const stripeDashboardType: string = account?.controller?.stripe_dashboard?.type ?? "unknown";
         const currentlyDue: string[] = account?.requirements?.currently_due ?? [];
         const transfersCap: string = account?.capabilities?.transfers ?? "unknown";
 
         console.log(
           "[create-creator-connect-account] account status —",
           "id:", stripeAccountId,
-          "dashboard/controller type:", dashboardType,
+          "controller.stripe_dashboard.type:", stripeDashboardType,
+          "controller.type:", account?.controller?.type,
           "currently_due:", currentlyDue,
           "transfers capability:", transfersCap,
         );
 
         // Express accounts cannot use embedded Account Sessions — they always
         // return an auth error. Replace with a fresh Recipient account.
-        const isExpress = dashboardType === "express" || account?.controller?.type === "application";
+        // Only flag as Express when stripe_dashboard.type is literally "express".
+        const isExpress = stripeDashboardType === "express";
         if (isExpress) {
           console.warn(
             "[create-creator-connect-account] account is Express-type — incompatible with embedded components.",
