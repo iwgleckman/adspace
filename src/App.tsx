@@ -4624,7 +4624,7 @@ function StripeOnboardingScreen({ clientSecret, onDone }: { clientSecret: string
         </div>
         <h1 className="text-xl font-bold text-gray-900 mb-1">Connect your payout account</h1>
         <p className="text-sm text-gray-500 mb-6">
-          Add your bank account so AdSpace can send you payments when a sponsor&apos;s video is approved.
+          Add your bank account so AdSpace can send you payments when your video submission is approved.
         </p>
         {loadErr ? (
           <div className="rounded-xl p-4 text-sm" style={{ backgroundColor: "#FFF1F2", color: "#E11D48" }}>
