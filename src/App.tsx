@@ -4571,7 +4571,8 @@ function LandingPage({ onSelect }: { onSelect: (role: "advertiser" | "creator") 
    Renders the <stripe-connect-account-onboarding> web component inside
    the app so creators can add a payout bank account without leaving.
 ================================================================ */
-const STRIPE_PUBLISHABLE_KEY = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY as string | undefined;
+// Stripe publishable keys are safe to expose in frontend code — only sk_... keys are secret.
+const STRIPE_PUBLISHABLE_KEY = "pk_test_51UIEWdK15Jp0Ok9N6qdYH4dAROW9PcXNvIwLIlCp03MYs8NS6tEtocL6ExKOpy4KzVh3f5kAA9b7e9mUZX8r9cIL0081bOL3ek";
 
 function StripeOnboardingScreen({ clientSecret, onDone }: { clientSecret: string; onDone: () => void }) {
   const mountRef = useRef<HTMLDivElement>(null);
