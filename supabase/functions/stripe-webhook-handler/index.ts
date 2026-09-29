@@ -130,7 +130,15 @@ Deno.serve(async (req: Request) => {
     } else if (transferAmountCents <= 0) {
       console.warn("[stripe-webhook] transferAmountCents is 0, skipping transfer for submission:", submission.id);
     } else {
-      const idempotencyKey = `flat-fee-transfer-${submission.id}`;
+      // Stripe caches idempotency keys for 24 h. A fixed per-submission key means
+      // a cached failure (e.g. insufficient funds) blocks all retries for a full day.
+      // Appending a UTC hour bucket lets retries after ~1 h get a fresh Stripe attempt
+      // while still deduplicating rapid webhook replays within the same hour window.
+      // Double-pay safety: the payment_status !== 'paid' check above already gates
+      // entry to this block, so a successful transfer always marks paid before any
+      // retry could re-enter.
+      const hourBucket = Math.floor(Date.now() / 3_600_000);
+      const idempotencyKey = `flat-fee-transfer-${submission.id}-${hourBucket}`;
       console.log(
         "[stripe-webhook] transferring", transferAmountCents, "cents to", stripeAccountId,
         "idempotency:", idempotencyKey,
