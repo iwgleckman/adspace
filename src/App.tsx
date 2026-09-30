@@ -2327,15 +2327,12 @@ function MessagesView({ conversations = [], setConversations, initialCreatorId }
             ageBreakdown: null, genderBreakdown: null, geoBreakdown: null, languageBreakdown: null,
           };
 
-          // Build all submissions for this offer, auto-approving any stale pending ones
+          // Build all submissions for this offer (auto-approve is now handled by the
+          // auto-approve-submissions edge function on a 15-minute cron schedule)
           const rawSubs = subsByOffer.get(o.id) ?? [];
-          const submissions: Submission[] = await Promise.all(rawSubs.map(async (rawSub: any) => {
-            let approved_at = rawSub.approved_at;
-            let approval_status = rawSub.approval_status;
-            if (approval_status === "pending_review") {
-              const auto = await maybeAutoApprove({ id: rawSub.id, approvalStatus: approval_status, submittedAt: rawSub.submitted_at });
-              if (auto) { approval_status = "approved"; approved_at = auto.approvedAt; }
-            }
+          const submissions: Submission[] = rawSubs.map((rawSub: any) => {
+            const approved_at = rawSub.approved_at;
+            const approval_status = rawSub.approval_status;
             return {
               id: rawSub.id,
               videoUrl: rawSub.video_url,
@@ -2349,7 +2346,7 @@ function MessagesView({ conversations = [], setConversations, initialCreatorId }
               payoutWindowEndsAt: rawSub.payout_window_ends_at ?? null,
               stripeTransferId: rawSub.stripe_transfer_id ?? null,
             };
-          }));
+          });
 
           const offerMsg: Message & { _sortTs: number } = {
             id: o.id as any,
@@ -3575,15 +3572,12 @@ function CreatorMessagesView({
             .order("created_at", { ascending: true });
           console.log("[creator-messages] messages from DB:", dbMsgs?.length ?? 0, msgsErr?.message ?? "ok");
 
-          // Resolve all submissions + auto-approve stale pending ones
+          // Resolve all submissions (auto-approve is now handled by the
+          // auto-approve-submissions edge function on a 15-minute cron schedule)
           const rawSubs = subsByOffer.get(offer.id) ?? [];
-          const submissions: Submission[] = await Promise.all(rawSubs.map(async (rawSub: any) => {
-            let approved_at = rawSub.approved_at;
-            let approval_status = rawSub.approval_status;
-            if (approval_status === "pending_review") {
-              const auto = await maybeAutoApprove({ id: rawSub.id, approvalStatus: approval_status, submittedAt: rawSub.submitted_at });
-              if (auto) { approval_status = "approved"; approved_at = auto.approvedAt; }
-            }
+          const submissions: Submission[] = rawSubs.map((rawSub: any) => {
+            const approved_at = rawSub.approved_at;
+            const approval_status = rawSub.approval_status;
             return {
               id: rawSub.id,
               videoUrl: rawSub.video_url,
@@ -3592,7 +3586,7 @@ function CreatorMessagesView({
               approvedAt: approved_at ?? undefined,
               rejectionReason: rawSub.rejection_reason ?? undefined,
             };
-          }));
+          });
 
           const appMsg: CreatorMsg = {
             id: offer.id,
@@ -4577,8 +4571,16 @@ const STRIPE_PUBLISHABLE_KEY = "pk_test_51UIEWdK15Jp0Ok9N6qdYH4dAROW9PcXNvIwLIlC
 function StripeOnboardingScreen({ clientSecret, onDone }: { clientSecret: string; onDone: () => void }) {
   const mountRef = useRef<HTMLDivElement>(null);
   const [loadErr, setLoadErr] = useState<string | null>(null);
+  // Guard against double-invocation (React Strict Mode fires effects twice in
+  // dev; the cleanup between the two runs unmounts the container but the second
+  // fire would call loadConnectAndInitialize again with the same already-claimed
+  // clientSecret, producing "account session has already been claimed").
+  const hasInitialized = useRef(false);
 
   useEffect(() => {
+    if (hasInitialized.current) return;
+    hasInitialized.current = true;
+
     if (!STRIPE_PUBLISHABLE_KEY) {
       setLoadErr("VITE_STRIPE_PUBLISHABLE_KEY is not set. Add pk_test_… to your .env file.");
       return;
@@ -4587,7 +4589,6 @@ function StripeOnboardingScreen({ clientSecret, onDone }: { clientSecret: string
 
     // Connect.js loads its script from Stripe's CDN asynchronously, so load
     // failures don't throw inside the try/catch — they surface as window errors.
-    // This listener catches them and converts to the in-UI error state.
     const onWindowError = (e: ErrorEvent) => {
       if (String(e.message).includes("Connect.js") || String(e.message).includes("connect-js")) {
         setLoadErr(
