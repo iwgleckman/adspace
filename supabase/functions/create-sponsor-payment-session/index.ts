@@ -130,15 +130,20 @@ Deno.serve(async (req: Request) => {
     }
 
     const flatFeeDollars = Number(campaign.flat_fee ?? 0);
-    if (flatFeeDollars <= 0) {
-      return new Response(JSON.stringify({ error: "Campaign flat_fee must be > 0 to create a payment session" }), {
+    const payoutCapDollars = campaign.payout_cap ? Number(campaign.payout_cap) : null;
+
+    // Error only when there is genuinely nothing to charge.
+    // Pure CPM campaigns (flat_fee=0, payout_cap>0) are valid — the full cap is held.
+    const totalChargeable = flatFeeDollars + (payoutCapDollars ?? 0);
+    if (totalChargeable <= 0) {
+      return new Response(JSON.stringify({ error: "Campaign has no chargeable amount (flat_fee and payout_cap are both 0)" }), {
         status: 400,
         headers: { ...CORS, "Content-Type": "application/json" },
       });
     }
 
-    const payoutCapDollars = campaign.payout_cap ? Number(campaign.payout_cap) : null;
-    // Only split if cap exceeds flat fee — otherwise charge flat fee only (uncapped or cap == flat fee).
+    // isCapped: there is a cap AND it exceeds the flat fee (so something is held).
+    // For pure CPM (flat_fee=0, payout_cap>0): isCapped=true, heldCents=full cap.
     const isCapped = payoutCapDollars !== null && payoutCapDollars > flatFeeDollars;
 
     const flatFeeCents = Math.round(flatFeeDollars * 100);
@@ -150,14 +155,21 @@ Deno.serve(async (req: Request) => {
     );
 
     // ── Build line items ────────────────────────────────────────────────────
-    const lineItems: Record<string, string> = {
-      "line_items[0][price_data][currency]": "usd",
-      "line_items[0][price_data][unit_amount]": String(flatFeeCents),
-      "line_items[0][price_data][product_data][name]": `AdSpace · ${campaign.name} — Flat fee`,
-      "line_items[0][price_data][product_data][description]":
-        "Paid to the creator immediately once your payment is confirmed.",
-      "line_items[0][quantity]": "1",
-    };
+    // Stripe rejects unit_amount=0, so skip the flat-fee line item for pure CPM
+    // campaigns. When both items are present, flat fee is [0] and hold is [1].
+    // When only the hold exists (flatFeeCents=0), it becomes [0].
+    const lineItems: Record<string, string> = {};
+    let nextIdx = 0;
+
+    if (flatFeeCents > 0) {
+      const i = nextIdx++;
+      lineItems[`line_items[${i}][price_data][currency]`] = "usd";
+      lineItems[`line_items[${i}][price_data][unit_amount]`] = String(flatFeeCents);
+      lineItems[`line_items[${i}][price_data][product_data][name]`] = `AdSpace · ${campaign.name} — Flat fee`;
+      lineItems[`line_items[${i}][price_data][product_data][description]`] =
+        "Paid to the creator immediately once your payment is confirmed.";
+      lineItems[`line_items[${i}][quantity]`] = "1";
+    }
 
     if (isCapped && heldCents > 0) {
       const payoutWindowDays = Number(campaign.payout_window_days ?? 30);
@@ -167,14 +179,15 @@ Deno.serve(async (req: Request) => {
         const windowEndsDate = new Date(new Date(approvedAt).getTime() + payoutWindowDays * 86_400_000);
         windowEndsLabel = windowEndsDate.toLocaleDateString("en-US", { month: "long", day: "numeric", year: "numeric" });
       }
-      lineItems["line_items[1][price_data][currency]"] = "usd";
-      lineItems["line_items[1][price_data][unit_amount]"] = String(heldCents);
-      lineItems["line_items[1][price_data][product_data][name]"] =
+      const i = nextIdx++;
+      lineItems[`line_items[${i}][price_data][currency]`] = "usd";
+      lineItems[`line_items[${i}][price_data][unit_amount]`] = String(heldCents);
+      lineItems[`line_items[${i}][price_data][product_data][name]`] =
         `AdSpace · ${campaign.name} — Performance hold (up to cap)`;
-      lineItems["line_items[1][price_data][product_data][description]"] =
+      lineItems[`line_items[${i}][price_data][product_data][description]`] =
         `Held by AdSpace until the payout window ends${windowEndsLabel ? ` on ${windowEndsLabel}` : ""}. ` +
         `Nothing further is paid out before then — once the window closes, the creator is paid based on CPM performance and any unused amount is refunded to you.`;
-      lineItems["line_items[1][quantity]"] = "1";
+      lineItems[`line_items[${i}][quantity]`] = "1";
     }
 
     // ── Create Stripe Checkout Session ──────────────────────────────────────
